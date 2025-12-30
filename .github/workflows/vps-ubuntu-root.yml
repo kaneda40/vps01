@@ -1,4 +1,4 @@
-name: VPS-Ubuntu-Root-24-04-Infinite
+name: VPS-Ubuntu-Root-24-04-Open
 
 on:
   workflow_dispatch:
@@ -7,7 +7,7 @@ env:
   TZ: UTC
 
 jobs:
-  boot-and-root:
+  open-vps:
     runs-on: ubuntu-24.04
     steps:
       - name: Update system
@@ -19,37 +19,27 @@ jobs:
         run: |
           curl -fsSL https://tailscale.com/install.sh | sh
           sudo tailscale up --authkey="${{ secrets.TAILSCALE_AUTH_KEY }}" \
-                           --hostname="gh-root-${{ github.run_id }}"
+                           --hostname="gh-open-${{ github.run_id }}"
 
-      - name: Create user 'vps@35' with random password
-        id: user
+      - name: Create user 'vps@35' with static password
         run: |
-          PASS=$(openssl rand -base64 32)
           sudo useradd -m -s /bin/bash vps@35
-          echo "vps@35:$PASS" | sudo chpasswd
+          echo "vps@35:vps@35" | sudo chpasswd
           sudo usermod -aG sudo vps@35
-          echo "vps@35 ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/99-vps
-          sudo usermod -L vps@35
-          echo "USER=vps@35" >> $GITHUB_OUTPUT
-          echo "PASSWORD=$PASS" >> $GITHUB_OUTPUT
-          echo "::notice::User: vps@35  |  Password: $PASS"
 
-      - name: Add your SSH public key
+      - name: Allow sudo without password for ALL users
         run: |
-          sudo mkdir -p /home/vps@35/.ssh
-          echo "${{ secrets.VPS_PUBLIC_KEY }}" | sudo tee /home/vps@35/.ssh/authorized_keys
-          sudo chown -R vps@35:vps@35 /home/vps@35/.ssh
-          sudo chmod 700 /home/vps@35/.ssh
-          sudo chmod 600 /home/vps@35/.ssh/authorized_keys
+          echo "%sudo ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/99-all-sudo
+          echo "ALL ALL=(ALL) NOPASSWD:ALL"   | sudo tee -a /etc/sudoers.d/99-all-sudo
 
-      - name: Harden SSH (key-only)
+      - name: Enable root login with static password
         run: |
-          sudo sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config
-          sudo sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin no/' /etc/ssh/sshd_config
-          sudo sed -i 's/^#\?PubkeyAuthentication.*/PubkeyAuthentication yes/' /etc/ssh/sshd_config
+          echo "root:vps@35" | sudo chpasswd
+          sudo sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
+          sudo sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
           sudo service ssh restart || true
 
-      - name: Show credentials & Tailscale IP
+      - name: Show Tailscale IP
         id: ts
         run: |
           IP=$(tailscale ip -4 | head -n1)
