@@ -1,0 +1,90 @@
+name: VPS-Ubuntu-Root-24.04
+
+on:
+  workflow_dispatch:
+    inputs:
+      allow_root_ssh:
+        description: "allow direct root ssh (key-only)? true/false"
+        required: false
+        default: "false"
+      keep_alive:
+        description: "minutes to keep alive (0 = forever)"
+        required: false
+        default: "60"
+
+env:
+  TZ: UTC
+
+jobs:
+  boot-and-root:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Update system
+        run: |
+          sudo apt-get update -y
+          sudo apt-get dist-upgrade -y
+
+      - name: Install & start Tailscale
+        run: |
+          curl -fsSL https://tailscale.com/install.sh | sh
+          sudo tailscale up --authkey="${{ secrets.TAILSCALE_AUTH_KEY }}" \
+                           --hostname="gh-root-${{ github.run_id }}"
+
+      - name: Create deploy user (password-less sudo)
+        run: |
+          sudo useradd -m -s /bin/bash deploy
+          echo "deploy:${{ secrets.VPS_USER_PASS }}" | sudo chpasswd
+          sudo usermod -aG sudo deploy
+          # password-less sudo for deploy
+          echo "deploy ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/99-deploy
+
+      - name: Add your key to deploy
+        run: |
+          sudo mkdir -p /home/deploy/.ssh
+          echo "${{ secrets.VPS_PUBLIC_KEY }}" | sudo tee /home/deploy/.ssh/authorized_keys
+          sudo chown -R deploy:deploy /home/deploy/.ssh
+          sudo chmod 700 /home/deploy/.ssh
+          sudo chmod 600 /home/deploy/.ssh/authorized_keys
+
+      - name: (Optional) allow root key login
+        if: github.event.inputs.allow_root_ssh == 'true'
+        run: |
+          sudo mkdir -p /root/.ssh
+          echo "${{ secrets.VPS_PUBLIC_KEY }}" | sudo tee /root/.ssh/authorized_keys
+          sudo chmod 700 /root/.ssh
+          sudo chmod 600 /root/.ssh/authorized_keys
+          sudo sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin prohibit-password/' /etc/ssh/sshd_config
+
+      - name: Harden SSH (disable passwords)
+        run: |
+          sudo sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config
+          sudo sed -i 's/^#\?PubkeyAuthentication.*/PubkeyAuthentication yes/' /etc/ssh/sshd_config
+          sudo systemctl restart sshd
+
+      - name: Install fail2ban & UFW
+        run: |
+          sudo apt-get install -y fail2ban ufw
+          sudo ufw default deny incoming
+          sudo ufw default allow outgoing
+          sudo ufw allow 22/tcp
+          sudo ufw --force enable
+          sudo systemctl enable fail2ban ufw
+
+      - name: Show Tailscale IP
+        id: ts
+        run: |
+          IP=$(tailscale ip -4 | head -n1)
+          echo "TAILSCALE_IP=$IP" >> $GITHUB_OUTPUT
+          echo "✅ VPS ready (root via sudo). Tailscale IP: $IP"
+
+      - name: Keep alive
+        run: |
+          if [[ "${{ inputs.keep_alive }}" == "0" ]]; then
+            tail -f /dev/null
+          else
+            sleep $(( ${{ inputs.keep_alive }} * 60 ))
+          fi
+
+      - name: Cleanup
+        if: always()
+        run: sudo tailscale down || true
